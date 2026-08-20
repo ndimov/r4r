@@ -1,0 +1,29 @@
+r4r
+  s_cd13928ed0abc6::t_d98c747fce429a 1-838
+.gitignore
+  s_cd13928ed0abc6::t_5ad4e1de92dfdb 1-9
+README.md
+  s_cd13928ed0abc6::t_e60643ebf79b15 1-77
+r4r-from-browser
+  s_cd13928ed0abc6::t_acad0b127c215e 1-164
+raycast/r4r-copy-current-page.sh
+  s_cd13928ed0abc6::t_3243eb67403a4e 1-15
+raycast/r4r-current-page.sh
+  s_cd13928ed0abc6::t_0bdce08a857b19 1-15
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "aaa93a07dfa32ad765f7f4edda7b5f4d7fb8f280",
+  "prompts": {},
+  "sessions": {
+    "s_cd13928ed0abc6": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "bce68dec-0ca4-4153-b17f-acc2d78b7f9e",
+        "model": "grok-4.6"
+      },
+      "human_author": "Nicholai Dimov <ndimov@Nicholais-MacBook-Pro.local>"
+    }
+  }
+}

@@ -1,0 +1,22 @@
+r4r
+  s_5aa980d55a6cb1::t_d173c33c084a48 130-137
+  s_5aa980d55a6cb1::t_8df1b8df3d25ea 666-667
+README.md
+  s_5aa980d55a6cb1::t_ebfa86e3f4d1ab 10
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.23",
+  "base_commit_sha": "80d78486a81a75a4748ff4b06e0cb89eca03c844",
+  "prompts": {},
+  "sessions": {
+    "s_5aa980d55a6cb1": {
+      "agent_id": {
+        "tool": "cursor",
+        "id": "fd349e3b-d8ce-4a87-9ea3-e803ef0f0a14",
+        "model": "grok-4.6"
+      },
+      "human_author": "Nicholai Dimov <ndimov@Nicholais-MacBook-Pro.local>"
+    }
+  }
+}

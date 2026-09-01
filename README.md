@@ -7,7 +7,7 @@ Mark a GitHub pull request ready for review: add the `ready for review` label, t
 ## What it does
 
 - **`r4r <pr>`** — labels the PR and creates a Slack draft pinging manually requested reviewers (skips CODEOWNERS auto-requests).
-- **`r4r --copy <pr>`** — labels the PR and copies `{title} {url}` to the clipboard. No mentions, no Slack draft.
+- **`r4r --copy <pr>`** — labels the PR and copies `{title} {url-without-https}` to the clipboard. No mentions, no Slack draft. Slack still autolinks it but skips the preview (it only unfurls `http://` / `https://` URLs).
 - **Raycast ⌘⌥R** — grab the front browser tab URL and run the Slack-draft flow.
 - **Raycast ⌘⌥⇧R** — same, but copy title + link (no mentions, no Slack draft).
 

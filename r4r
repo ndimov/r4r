@@ -127,6 +127,14 @@ strip_conventional_prefix() {
   printf '%s' "$title" | sed -E 's/^[A-Za-z0-9_-]+(\([^)]*\))?:[[:space:]]+//'
 }
 
+# Slack only unfurls fully-qualified http(s) URLs. Same label the draft uses.
+strip_url_protocol() {
+  local url="$1"
+  url="${url#https://}"
+  url="${url#http://}"
+  printf '%s' "$url"
+}
+
 lookup_slack_id() {
   local login="$1"
   local lower
@@ -655,7 +663,8 @@ process_pr() {
   pr_url="${PR_URL:-https://github.com/${REPO}/pull/${PR_NUMBER}}"
 
   if [[ "$COPY_MODE" -eq 1 ]]; then
-    clip="${clean_title} ${pr_url}"
+    # Protocol-less URL so Slack autolinks without a preview (same as the draft).
+    clip="${clean_title} $(strip_url_protocol "$pr_url")"
     if [[ "$DRY_RUN" -eq 1 ]]; then
       print::success "Dry run — would copy: ${clip}"
       return 0

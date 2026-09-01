@@ -1,0 +1,10 @@
+---
+description: This personal repo publishes directly to main
+alwaysApply: true
+---
+
+# Push to main
+
+This is a private personal repo. There is no feature-branch workflow.
+
+When asked to push, commit (if needed) and `git push origin main`. Do not open a PR or switch branches for that.

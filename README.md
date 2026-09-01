@@ -58,7 +58,14 @@ Use your clone path if it isn't `~/dev/r4r`.
 
 ### GitHub → Slack map
 
-Drafts resolve GitHub logins to Slack user IDs via `infrastructure/github-to-slack.json` in a local [clay-base](https://github.com/clay-run/clay-base) checkout (`~/dev/clay-base` by default). Override with `R4R_CLAY_BASE`.
+Drafts resolve GitHub logins to Slack user IDs via `infrastructure/github-to-slack.json` in a local [clay-base](https://github.com/clay-run/clay-base) checkout (`~/dev/clay-base` by default). Override with `R4R_CLAY_BASE`. Keys are GitHub usernames; values are Slack user ids (`U…`). Lookup is case-insensitive.
+
+```json
+{
+  "sam": "U012ABCDEF",
+  "riley": "U034GHIJKL"
+}
+```
 
 ### Raycast
 

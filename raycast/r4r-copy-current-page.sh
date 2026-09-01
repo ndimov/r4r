@@ -7,7 +7,7 @@
 #
 # Optional parameters:
 # @raycast.icon 📋
-# @raycast.hotkey cmd + option + shift + r
+# @raycast.hotkey cmd + option + e
 # @raycast.description Copy title + PR link (no mentions) from the front browser tab; skip Slack draft
 
 set -euo pipefail

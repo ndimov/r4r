@@ -725,7 +725,7 @@ listen_loop() {
   local line candidate raw
 
   print::hint "Listening for PRs — paste a URL/number and press enter. Ctrl-C to quit."
-  print::hint "Tip: ⌘⌥R (Raycast) drafts Slack with @mentions; ⌘⌥⇧R copies title + link (no mentions)."
+  print::hint "Tip: ⌘⌥R (Raycast) drafts Slack with @mentions; ⌘⌥E copies title + link (no mentions)."
   if [[ "$DRY_RUN" -eq 1 ]]; then
     print::hint "(dry-run mode)"
   fi

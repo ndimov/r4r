@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # r4r-from-browser — copy the frontmost browser tab URL, then run r4r on it.
 # Bound to ⌘⌥R via Raycast Script Command: raycast/r4r-current-page.sh
-# Bound to ⌘⌥⇧R (copy, no Slack draft) via: raycast/r4r-copy-current-page.sh
+# Bound to ⌘⌥E (copy, no Slack draft) via: raycast/r4r-copy-current-page.sh
 #
 # Usage: r4r-from-browser [--copy] [extra r4r args…]
 #

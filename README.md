@@ -2,12 +2,32 @@
 
 **This repository is fully AI-generated.**
 
-Mark a GitHub pull request ready for review: add the `ready for review` label, then either create a Slack draft with real `@`mentions or copy the title + link to the clipboard.
+Ready-for-review helper: from the GitHub or Graphite tab you already have open, add the `ready for review` label and either draft a Slack ping or copy title + link.
+
+## Why
+
+Asking for review is a pile of small steps: add a label, remember who you actually requested (not CODEOWNERS auto-adds), look up Slack handles, paste the title and URL, then dismiss the giant GitHub/Graphite unfurl. r4r does that from a hotkey.
+
+⌘⌥R writes a Slack **draft** with real mention pills (not raw `<@U…>` text) so you can edit before send. ⌘⌥⇧R copies the same line with no mentions when you want to paste it yourself. Links are protocol-less (`github.com/…` instead of `https://…`) so Slack autolinks them without a preview.
+
+## Example
+
+Sample data only (`acme/widgets`, `@sam`, `@riley`).
+
+**Slack draft (⌘⌥R)** — mentions, title, protocol-less link, no unfurl:
+
+![Example Slack draft: @sam @riley: Add widget caching for the dashboard github.com/acme/widgets/pull/4242](docs/example-slack-draft.png)
+
+**Clipboard (⌘⌥⇧R / `r4r --copy`)** — same line, no mentions:
+
+```
+Add widget caching for the dashboard github.com/acme/widgets/pull/4242
+```
 
 ## What it does
 
 - **`r4r <pr>`** — labels the PR and creates a Slack draft pinging manually requested reviewers (skips CODEOWNERS auto-requests).
-- **`r4r --copy <pr>`** — labels the PR and copies `{title} {url-without-https}` to the clipboard. No mentions, no Slack draft. Slack still autolinks it but skips the preview (it only unfurls `http://` / `https://` URLs).
+- **`r4r --copy <pr>`** — labels the PR and copies `{title} {url-without-https}` to the clipboard. No mentions, no Slack draft.
 - **Raycast ⌘⌥R** — grab the front browser tab URL and run the Slack-draft flow.
 - **Raycast ⌘⌥⇧R** — same, but copy title + link (no mentions, no Slack draft).
 
@@ -42,7 +62,7 @@ Drafts resolve GitHub logins to Slack user IDs via `infrastructure/github-to-sla
 
 ### Raycast
 
-Add this repo's `raycast/` folder as a Script Commands directory, **or** keep thin wrappers in `~/dev/raycast` that exec `$HOME/dev/r4r/r4r-from-browser`.
+Add this repo's `raycast/` folder as a Script Commands directory.
 
 Grant Automation access when macOS prompts (System Events + your browser) so the front-tab URL can be read.
 

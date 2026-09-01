@@ -1,0 +1,838 @@
+#!/usr/bin/env bash
+# r4r — mark a PR ready for review and create a Slack draft ping for requested reviewers.
+#
+# Usage:
+#   r4r                         # live listen (stdin paste)
+#   r4r <pr-number-or-url>      # one-shot (label + Slack draft)
+#   r4r --copy <pr-number-or-url>  # label + copy title/link (no mentions, no Slack draft)
+#   r4r [--channel C…] [--dry-run] [--copy] …
+#
+# Mentions are real Slack user entities (not plain "<@U…>" text). Auth comes from
+# slackcli browser session: ~/.config/slackcli/workspaces.json
+#   brew tap shaharia-lab/tap && brew install slackcli
+#   slackcli auth parse-curl --login
+#
+# Config:
+#   R4R_SLACK_CHANNEL   Override Slack channel (default: C0A1HCU4PRB)
+#   R4R_REPO            GitHub repo (default: clay-run/clay-base)
+#   R4R_CLAY_BASE       Local clay-base checkout (default: ~/dev/clay-base)
+#   R4R_SLACKCLI_CONFIG Path to slackcli workspaces.json
+#   R4R_LOG             Log file (default: ~/Library/Logs/r4r.log)
+#   R4R_OPEN_SLACK      Open Slack to the channel after drafting (default: 1; set 0 to skip)
+
+set -euo pipefail
+
+R4R_LOG="${R4R_LOG:-$HOME/Library/Logs/r4r.log}"
+mkdir -p "$(dirname "$R4R_LOG")" 2>/dev/null || true
+
+r4r_log() {
+  # Strip ANSI so the log stays readable
+  local msg
+  msg="$(printf '%s' "$*" | sed $'s/\033\\[[0-9;]*m//g')"
+  printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$msg" >>"$R4R_LOG" 2>/dev/null || true
+}
+
+if [[ -t 1 ]] && [[ -z "${NO_COLOR:-}" ]]; then
+  _RESET=$'\033[0m' _GREEN=$'\033[0;32m' _YELLOW=$'\033[0;33m' _RED=$'\033[0;31m' _CYAN=$'\033[0;36m'
+else
+  _RESET='' _GREEN='' _YELLOW='' _RED='' _CYAN=''
+fi
+print::info()    { printf '%s\n' "$*" >&2; r4r_log "INFO  $*"; }
+print::success() { printf '%s%s%s\n' "$_GREEN"  "$*" "$_RESET" >&2; r4r_log "OK    $*"; }
+print::warning() { printf '%s%s%s\n' "$_YELLOW" "$*" "$_RESET" >&2; r4r_log "WARN  $*"; }
+print::error()   { printf '%s%s%s\n' "$_RED"    "$*" "$_RESET" >&2; r4r_log "ERROR $*"; }
+print::hint()    { printf '%s%s%s\n' "$_CYAN"   "$*" "$_RESET" >&2; r4r_log "HINT  $*"; }
+
+CLAY_BASE="${R4R_CLAY_BASE:-$HOME/dev/clay-base}"
+DEFAULT_REPO="${R4R_REPO:-clay-run/clay-base}"
+DEFAULT_CHANNEL="${R4R_SLACK_CHANNEL:-C0A1HCU4PRB}"
+SLACK_MAP="${CLAY_BASE}/infrastructure/github-to-slack.json"
+SLACKCLI_CONFIG="${R4R_SLACKCLI_CONFIG:-$HOME/.config/slackcli/workspaces.json}"
+LABEL="ready for review"
+
+usage() {
+  cat <<'EOF'
+Usage: r4r [pr-number-or-url] [--channel C…] [--dry-run] [--copy]
+
+With no PR argument, listens live:
+  • paste a PR URL/number into this terminal and press enter
+
+Pings manually requested User reviewers only (skips CODEOWNERS auto-requests).
+Creates a Slack draft with real @mentions via your slackcli browser session.
+
+Options:
+  --channel C…   Slack destination (default: C0A1HCU4PRB)
+  --copy         Copy title + link (no mentions) to the clipboard; skip Slack draft
+  --dry-run      Print the draft line; do not label or create draft
+  --replace      If a draft already exists in the channel, replace it
+  --keep         If a draft already exists, leave it and skip create
+  -h, --help     Show this help
+
+Logs: ~/Library/Logs/r4r.log (override with R4R_LOG)
+EOF
+}
+
+die() {
+  print::error "$*"
+  exit 1
+}
+
+# Extract owner/repo and PR number from free-form input.
+# Sets: PR_NUMBER, REPO (owner/name), PR_URL (share link matching the source host when known)
+parse_pr_ref() {
+  local input="$1"
+  input="${input#"${input%%[![:space:]]*}"}"
+  input="${input%"${input##*[![:space:]]}"}"
+
+  REPO="$DEFAULT_REPO"
+  PR_NUMBER=""
+  PR_URL=""
+
+  if [[ "$input" =~ github\.com/([^/]+)/([^/#?]+)/pull/([0-9]+) ]]; then
+    REPO="${BASH_REMATCH[1]}/${BASH_REMATCH[2]}"
+    PR_NUMBER="${BASH_REMATCH[3]}"
+    PR_URL="https://github.com/${REPO}/pull/${PR_NUMBER}"
+    return 0
+  fi
+
+  # Preserve app.graphite.com vs app.graphite.dev; drop title slug / query / hash.
+  if [[ "$input" =~ (https?://)?(app\.)?graphite\.(dev|com)/github/pr/([^/]+)/([^/#?]+)/([0-9]+) ]]; then
+    local tld="${BASH_REMATCH[3]}"
+    REPO="${BASH_REMATCH[4]}/${BASH_REMATCH[5]}"
+    PR_NUMBER="${BASH_REMATCH[6]}"
+    PR_URL="https://app.graphite.${tld}/github/pr/${REPO}/${PR_NUMBER}"
+    return 0
+  fi
+
+  if [[ "$input" =~ pulls?/([0-9]+) ]]; then
+    PR_NUMBER="${BASH_REMATCH[1]}"
+    return 0
+  fi
+
+  if [[ "$input" =~ ^#?([0-9]+)$ ]]; then
+    PR_NUMBER="${BASH_REMATCH[1]}"
+    return 0
+  fi
+
+  if [[ "$input" =~ /(pull/)?([0-9]{1,7})([/?#]|$) ]]; then
+    PR_NUMBER="${BASH_REMATCH[2]}"
+    return 0
+  fi
+
+  return 1
+}
+
+strip_conventional_prefix() {
+  local title="$1"
+  printf '%s' "$title" | sed -E 's/^[A-Za-z0-9_-]+(\([^)]*\))?:[[:space:]]+//'
+}
+
+lookup_slack_id() {
+  local login="$1"
+  local lower
+  lower="$(printf '%s' "$login" | tr '[:upper:]' '[:lower:]')"
+  jq -r --arg lower "$lower" '
+    to_entries
+    | map(select(.key | ascii_downcase == $lower))
+    | first
+    | .value // empty
+  ' "$SLACK_MAP"
+}
+
+# Manual (non-CODEOWNERS) User review requests via GraphQL.
+# Prints one GitHub login per line.
+#
+# GitHub only sets asCodeOwner=true on Team requests. Individuals auto-added
+# alongside CODEOWNERS (e.g. team members expanded by Graphite/GitHub) still
+# show asCodeOwner=false — so we also drop Users requested within 30s of any
+# Team review request (same auto-request batch).
+fetch_manual_reviewers() {
+  local owner="$1" name="$2" number="$3"
+  gh api graphql \
+    -f query='
+      query($owner:String!,$name:String!,$number:Int!) {
+        repository(owner:$owner,name:$name) {
+          pullRequest(number:$number) {
+            reviewRequests(first:50) {
+              nodes {
+                asCodeOwner
+                requestedReviewer {
+                  __typename
+                  ... on User { login }
+                }
+              }
+            }
+            timelineItems(first:100, itemTypes:[REVIEW_REQUESTED_EVENT]) {
+              nodes {
+                ... on ReviewRequestedEvent {
+                  createdAt
+                  requestedReviewer {
+                    __typename
+                    ... on User { login }
+                    ... on Team { combinedSlug }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }' \
+    -f owner="$owner" \
+    -f name="$name" \
+    -F number="$number" \
+    --jq '
+      .data.repository.pullRequest as $pr
+      | ($pr.reviewRequests.nodes
+          | map(select(
+              .asCodeOwner == false
+              and .requestedReviewer.__typename == "User"
+              and (.requestedReviewer.login | type == "string")
+            ) | .requestedReviewer.login)
+          | unique) as $pending
+      | ($pr.timelineItems.nodes
+          | map({
+              ts: (.createdAt | fromdateiso8601),
+              kind: .requestedReviewer.__typename,
+              login: (.requestedReviewer.login // null)
+            })) as $evs
+      | ($evs | map(select(.kind == "Team") | .ts)) as $team_ts
+      | ($evs
+          | map(
+              select(.kind == "User" and (.login | type) == "string")
+              | . as $u
+              | select(any($team_ts[]; (($u.ts - .) | fabs) <= 30))
+              | .login
+            )
+          | unique) as $codeowner_batch
+      | ($pending - $codeowner_batch)
+      | .[]
+    '
+}
+
+# Build Slack drafts.create rich_text blocks with real user mention entities
+# and a proper link element (not raw URL text) so Slack won't unfurl/embed.
+# Args: clean_title pr_url, then zero+ Slack user ids.
+build_draft_blocks() {
+  local title="$1" url="$2"
+  shift 2
+  local ids_json
+  ids_json="$(printf '%s\n' "$@" | jq -R . | jq -s -c 'map(select(length>0))')"
+  jq -c -n --arg title "$title" --arg url "$url" --argjson ids "$ids_json" '
+    def mention_els:
+      if ($ids|length) == 0 then []
+      else
+        ($ids | map([{type:"user", user_id:.}, {type:"text", text:" "}]) | add)[0:-1]
+        + [{type:"text", text:": "}]
+      end;
+    # Link label = URL minus protocol → Slack skips unfurl for that pattern.
+    def link_label:
+      ($url | sub("^https?://"; ""));
+    [{
+      type: "rich_text",
+      elements: [{
+        type: "rich_text_section",
+        elements: (
+          mention_els
+          + [
+            {type: "text", text: ($title + " ")},
+            {type: "link", url: $url, text: link_label}
+          ]
+        )
+      }]
+    }]
+  '
+}
+
+# --- Slack draft helpers (browser session from slackcli config) ---
+
+slack_load_auth() {
+  # Sets: SLACK_WORKSPACE_URL SLACK_XOXC SLACK_COOKIE SLACK_TEAM_ID
+  local conf ws_id xoxd
+  [[ -f "$SLACKCLI_CONFIG" ]] || die "Missing slackcli config at $SLACKCLI_CONFIG — run: slackcli auth parse-curl --login"
+  conf="$(cat "$SLACKCLI_CONFIG")"
+  ws_id="$(jq -r '.default_workspace // (.workspaces|keys[0])' <<<"$conf")"
+  [[ -n "$ws_id" && "$ws_id" != "null" ]] || die "No default workspace in $SLACKCLI_CONFIG"
+  if [[ "$(jq -r --arg id "$ws_id" '.workspaces[$id].auth_type' <<<"$conf")" != "browser" ]]; then
+    die "Workspace $ws_id is not browser-auth; drafts need slackcli auth parse-curl --login"
+  fi
+  SLACK_TEAM_ID="$(jq -r --arg id "$ws_id" '.workspaces[$id].workspace_id // $id' <<<"$conf")"
+  SLACK_WORKSPACE_URL="$(jq -r --arg id "$ws_id" '.workspaces[$id].workspace_url' <<<"$conf")"
+  SLACK_XOXC="$(jq -r --arg id "$ws_id" '.workspaces[$id].xoxc_token' <<<"$conf")"
+  xoxd="$(jq -r --arg id "$ws_id" '.workspaces[$id].xoxd_token' <<<"$conf")"
+  [[ -n "$SLACK_XOXC" && "$SLACK_XOXC" != "null" && -n "$xoxd" && "$xoxd" != "null" ]] || die "Missing xoxc/xoxd tokens in slackcli config"
+  SLACK_COOKIE="d=$(jq -nr --arg t "$xoxd" '$t|@uri')"
+}
+
+# Slack has no deep link to a specific Drafts row. Opening the destination
+# channel is the reliable way to land on the draft in the composer.
+open_slack_to_channel() {
+  local channel="$1"
+  local team="${SLACK_TEAM_ID:-}"
+  local url
+
+  if [[ "${R4R_OPEN_SLACK:-1}" == "0" ]]; then
+    return 0
+  fi
+  if [[ -z "$team" || -z "$channel" ]]; then
+    print::hint "Open Slack Drafts (or the PR reviews channel) to send"
+    return 0
+  fi
+
+  url="slack://channel?team=${team}&id=${channel}"
+  print::info "Opening Slack to channel ${channel}…"
+  r4r_log "INFO  open ${url}"
+  open "$url" 2>/dev/null || open -a Slack "$url" 2>/dev/null || true
+}
+
+slack_api() {
+  # slack_api <method> [curl --data-urlencode args...]
+  # Prints response body on stdout. Returns curl's exit status.
+  local method="$1"
+  shift
+  curl -fsS -X POST "${SLACK_WORKSPACE_URL}/api/${method}" \
+    -H "Cookie: ${SLACK_COOKIE}" \
+    -H 'Content-Type: application/x-www-form-urlencoded' \
+    -H 'Origin: https://app.slack.com' \
+    -H 'User-Agent: Mozilla/5.0 (compatible; r4r/1.0)' \
+    --data-urlencode "token=${SLACK_XOXC}" \
+    "$@"
+}
+
+# Safe jq against possibly-empty API bodies. Default JSON object is "{}".
+slack_jq() {
+  local json="${1:-}"
+  shift
+  if [[ -z "$json" ]]; then
+    json='{}'
+  fi
+  jq "$@" <<<"$json"
+}
+
+# Preview text from draft blocks / text fields
+draft_preview_text() {
+  local draft_json="$1"
+  slack_jq "$draft_json" -r '
+    def el:
+      if .type == "user" then "@" + (.user_id // "?")
+      elif .type == "text" then (.text // "")
+      elif .type == "link" then (.text // .url // "")
+      elif .type == "emoji" then ":" + (.name // "") + ":"
+      else "" end;
+    def from_blocks:
+      [ (.. | objects | select(.type == "rich_text_section") | .elements[]? | el) ] | join("");
+    if (.blocks | type) == "array" and (.blocks|length) > 0 then
+      .blocks | from_blocks
+    elif (.blocks | type) == "string" and (.blocks|length) > 0 then
+      (.blocks | fromjson) | from_blocks
+    elif (.text | type) == "string" and (.text|length) > 0 then
+      .text
+    else
+      "(empty / unreadable draft)"
+    end
+  '
+}
+
+# List active drafts for a channel (one JSON object per line: {id, last_updated_ts, preview fields})
+list_channel_drafts() {
+  local channel="$1"
+  local resp ok
+  resp="$(slack_api drafts.list --data-urlencode 'is_active=true' --data-urlencode 'limit=100')" || return 1
+  ok="$(slack_jq "$resp" -r '.ok // false')"
+  if [[ "$ok" != "true" ]]; then
+    print::warning "drafts.list failed: $(slack_jq "$resp" -r '.error // "unknown"')"
+    return 1
+  fi
+  # Prefer python for large/messy draft payloads; fall back to jq.
+  if command -v python3 >/dev/null; then
+    CHANNEL_ID="$channel" python3 -c '
+import json, os, sys
+data = json.load(sys.stdin)
+ch = os.environ["CHANNEL_ID"]
+for d in data.get("drafts") or []:
+    dests = d.get("destinations") or []
+    if any((x.get("channel_id") or x.get("channel") or "") == ch for x in dests) or (d.get("channel_id") or d.get("channel") or "") == ch:
+        ts = d.get("last_updated_ts") or d.get("client_last_updated_ts") or str(d.get("date_created") or "")
+        print(json.dumps({"id": d.get("id"), "last_updated_ts": ts, "is_from_composer": d.get("is_from_composer"), "blocks": d.get("blocks"), "text": d.get("text")}, separators=(",", ":")))
+' <<<"$resp"
+  else
+    slack_jq "$resp" -c --arg ch "$channel" '
+      (.drafts // [])
+      | map(select(
+          ((.destinations // []) | map(.channel_id // .channel // empty) | index($ch))
+          or (.channel_id // .channel // "") == $ch
+        )
+        | {
+            id,
+            last_updated_ts: (.last_updated_ts // .client_last_updated_ts // (.date_created|tostring) // ""),
+            is_from_composer,
+            blocks,
+            text
+          })
+      | .[]
+    '
+  fi
+}
+
+# Slack draft timestamps must be 7 decimal places or delete/update returns
+# draft_has_conflict (see slack-mcp _pad_draft_ts).
+pad_draft_ts() {
+  local ts="$1" integer frac
+  [[ -n "$ts" ]] || { printf ''; return 1; }
+  if [[ "$ts" == *.* ]]; then
+    integer="${ts%%.*}"
+    frac="${ts#*.}"
+    while [[ ${#frac} -lt 7 ]]; do
+      frac="${frac}0"
+    done
+    printf '%s.%s' "$integer" "$frac"
+  else
+    printf '%s' "$ts"
+  fi
+}
+
+confirm_replace_draft() {
+  local answer
+  if [[ "$REPLACE_MODE" == "yes" ]]; then
+    return 0
+  fi
+  if [[ "$REPLACE_MODE" == "no" ]]; then
+    return 1
+  fi
+  if [[ ! -t 0 ]]; then
+    print::warning "Existing draft found and stdin is not a TTY — pass --replace to overwrite, or --keep to skip"
+    return 1
+  fi
+  printf '%s' "Replace existing draft? [y/N] " >&2
+  read -r answer || return 1
+  case "$answer" in
+    y | Y | yes | YES) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Delete one draft. client_last_updated_ts must be 7-decimal-padded.
+# Retries once on draft_has_conflict after re-fetching ts from drafts.list.
+delete_draft() {
+  local draft_id="$1" last_ts="$2" channel="${3:-}"
+  local resp ok err padded attempt fresh_ts
+
+  padded="$(pad_draft_ts "$last_ts")"
+  for attempt in 1 2 3; do
+    print::info "Deleting draft ${draft_id} (ts=${padded}, try ${attempt})…"
+    r4r_log "INFO  drafts.delete id=${draft_id} ts=${padded} attempt=${attempt}"
+    resp="$(
+      slack_api drafts.delete \
+        --data-urlencode "draft_id=${draft_id}" \
+        --data-urlencode "client_last_updated_ts=${padded}"
+    )" || {
+      print::warning "drafts.delete HTTP failed for ${draft_id}"
+      r4r_log "ERROR drafts.delete HTTP fail id=${draft_id}"
+      return 1
+    }
+    ok="$(slack_jq "$resp" -r '.ok // false')"
+    if [[ "$ok" == "true" ]]; then
+      print::success "Deleted ${draft_id}"
+      return 0
+    fi
+    err="$(slack_jq "$resp" -r '.error // "unknown"')"
+    r4r_log "WARN  drafts.delete id=${draft_id} error=${err} body=${resp}"
+    if [[ "$err" != "draft_has_conflict" && "$err" != "conflict" ]]; then
+      print::warning "drafts.delete ${draft_id}: ${err}"
+      return 1
+    fi
+    # Refresh ts and retry
+    if [[ -z "$channel" ]]; then
+      print::warning "drafts.delete conflict for ${draft_id} (no channel to refresh)"
+      return 1
+    fi
+    fresh_ts="$(
+      list_channel_drafts "$channel" 2>/dev/null \
+        | while IFS= read -r row; do
+            [[ "$(slack_jq "$row" -r '.id // empty')" == "$draft_id" ]] || continue
+            slack_jq "$row" -r '.last_updated_ts // empty'
+            break
+          done
+    )"
+    if [[ -z "$fresh_ts" ]]; then
+      print::info "Draft ${draft_id} gone after conflict — treating as deleted"
+      return 0
+    fi
+    padded="$(pad_draft_ts "$fresh_ts")"
+  done
+  print::warning "drafts.delete ${draft_id}: still conflicting after retries"
+  return 1
+}
+
+# Update an existing draft in place (preferred replace path).
+update_draft() {
+  local draft_id="$1" last_ts="$2" channel="$3" blocks_json="$4" destinations="$5"
+  local resp ok err padded attempt fresh_ts
+
+  padded="$(pad_draft_ts "$last_ts")"
+  for attempt in 1 2 3; do
+    print::info "Updating draft ${draft_id} (ts=${padded}, try ${attempt})…"
+    r4r_log "INFO  drafts.update id=${draft_id} ts=${padded} attempt=${attempt}"
+    resp="$(
+      slack_api drafts.update \
+        --data-urlencode "draft_id=${draft_id}" \
+        --data-urlencode "channel_id=${channel}" \
+        --data-urlencode "client_last_updated_ts=${padded}" \
+        --data-urlencode "blocks=${blocks_json}" \
+        --data-urlencode "destinations=${destinations}" \
+        --data-urlencode 'file_ids=[]' \
+        --data-urlencode 'unfurl_links=false' \
+        --data-urlencode 'unfurl_media=false'
+    )" || {
+      print::warning "drafts.update HTTP failed for ${draft_id}"
+      return 1
+    }
+    ok="$(slack_jq "$resp" -r '.ok // false')"
+    if [[ "$ok" == "true" ]]; then
+      slack_jq "$resp" -r '.draft.id // empty'
+      return 0
+    fi
+    err="$(slack_jq "$resp" -r '.error // "unknown"')"
+    r4r_log "WARN  drafts.update id=${draft_id} error=${err} body=${resp}"
+    if [[ "$err" != "draft_has_conflict" && "$err" != "conflict" ]]; then
+      print::warning "drafts.update ${draft_id}: ${err}"
+      return 1
+    fi
+    fresh_ts="$(
+      list_channel_drafts "$channel" 2>/dev/null \
+        | while IFS= read -r row; do
+            [[ "$(slack_jq "$row" -r '.id // empty')" == "$draft_id" ]] || continue
+            slack_jq "$row" -r '.last_updated_ts // empty'
+            break
+          done
+    )"
+    [[ -n "$fresh_ts" ]] || return 1
+    padded="$(pad_draft_ts "$fresh_ts")"
+  done
+  return 1
+}
+
+# Create or replace Slack draft. Uses real rich_text user mentions.
+#
+# Prefer delete+create over drafts.update: update clears last_updated_client,
+# and the Slack Mac app then hides the draft from Drafts & sent.
+create_slack_draft() {
+  local channel="$1" blocks_json="$2"
+  local destinations client_msg_id resp ok err
+  local existing_lines existing preview draft_id last_ts
+  local primary_id primary_ts line updated_id status
+  local deleted_ok=0
+
+  slack_load_auth
+  destinations="$(jq -c -n --arg ch "$channel" '[{channel_id:$ch}]')"
+
+  existing_lines="$(list_channel_drafts "$channel" || true)"
+  if [[ -n "$existing_lines" ]]; then
+    existing="$(printf '%s\n' "$existing_lines" | head -n1)"
+    preview="$(draft_preview_text "$existing")"
+    draft_id="$(slack_jq "$existing" -r '.id // empty')"
+    print::warning "Existing draft(s) in this channel${draft_id:+ (latest ${draft_id})}:"
+    printf '%s\n' "$preview" >&2
+    if ! confirm_replace_draft; then
+      print::info "Keeping existing draft — skipped create"
+      return 2
+    fi
+
+    # Delete every draft for this channel, then create fresh (keeps Drafts UI happy).
+    while IFS= read -r existing; do
+      [[ -n "$existing" ]] || continue
+      draft_id="$(slack_jq "$existing" -r '.id // empty')"
+      last_ts="$(slack_jq "$existing" -r '.last_updated_ts // empty')"
+      [[ -n "$draft_id" && -n "$last_ts" ]] || continue
+      if delete_draft "$draft_id" "$last_ts" "$channel"; then
+        deleted_ok=1
+      fi
+    done <<<"$existing_lines"
+
+    existing_lines="$(list_channel_drafts "$channel" || true)"
+    if [[ -n "$existing_lines" ]]; then
+      print::warning "Could not fully clear channel drafts — falling back to in-place update"
+      existing="$(printf '%s\n' "$existing_lines" | head -n1)"
+      primary_id="$(slack_jq "$existing" -r '.id // empty')"
+      primary_ts="$(slack_jq "$existing" -r '.last_updated_ts // empty')"
+      set +e
+      updated_id="$(update_draft "$primary_id" "$primary_ts" "$channel" "$blocks_json" "$destinations")"
+      status=$?
+      set -e
+      if [[ "$status" -eq 0 && -n "$updated_id" ]]; then
+        print::warning "Updated existing draft in place — if it doesn't appear in Slack Drafts, open #team-search-pr-reviews or reload Slack (⌘R)"
+        printf '%s\n' "$updated_id"
+        return 0
+      fi
+      die "Could not replace existing Slack draft(s). Delete them in Slack Drafts for #team-search-pr-reviews, then re-run r4r."
+    fi
+  fi
+
+  if command -v uuidgen >/dev/null; then
+    client_msg_id="$(uuidgen | tr '[:upper:]' '[:lower:]')"
+  else
+    client_msg_id="$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n' | sed 's/\(........\)\(....\)\(....\)\(....\)\(............\)/\1-\2-\3-\4-\5/')"
+  fi
+
+  # is_from_composer=true matches Slack desktop drafts so they show in Drafts & sent.
+  resp="$(
+    slack_api drafts.create \
+      --data-urlencode "client_msg_id=${client_msg_id}" \
+      --data-urlencode "blocks=${blocks_json}" \
+      --data-urlencode "destinations=${destinations}" \
+      --data-urlencode 'file_ids=[]' \
+      --data-urlencode 'is_from_composer=true' \
+      --data-urlencode 'unfurl_links=false' \
+      --data-urlencode 'unfurl_media=false'
+  )" || die "drafts.create HTTP request failed"
+
+  ok="$(slack_jq "$resp" -r '.ok // false')"
+  if [[ "$ok" != "true" ]]; then
+    err="$(slack_jq "$resp" -r '.error // "unknown"')"
+    r4r_log "ERROR drafts.create body=${resp}"
+    if [[ "$err" == "attached_draft_exists" ]]; then
+      existing_lines="$(list_channel_drafts "$channel" || true)"
+      existing="$(printf '%s\n' "$existing_lines" | head -n1)"
+      primary_id="$(slack_jq "$existing" -r '.id // empty')"
+      primary_ts="$(slack_jq "$existing" -r '.last_updated_ts // empty')"
+      if [[ -n "$primary_id" && -n "$primary_ts" ]]; then
+        set +e
+        updated_id="$(update_draft "$primary_id" "$primary_ts" "$channel" "$blocks_json" "$destinations")"
+        status=$?
+        set -e
+        if [[ "$status" -eq 0 && -n "$updated_id" ]]; then
+          print::warning "Updated in place after attached_draft_exists — open #team-search-pr-reviews or reload Slack (⌘R) if missing from Drafts"
+          printf '%s\n' "$updated_id"
+          return 0
+        fi
+      fi
+    fi
+    die "drafts.create failed: ${err}"
+  fi
+  slack_jq "$resp" -r '.draft.id // empty'
+}
+
+ensure_ready_label() {
+  local existing_labels
+  existing_labels="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json labels -q '.labels[].name')"
+  if printf '%s\n' "$existing_labels" | grep -Fxq "$LABEL"; then
+    print::warning "Label \"${LABEL}\" already on PR — skipping"
+    return 0
+  fi
+  print::info "Adding label \"${LABEL}\"…"
+  if gh pr edit "$PR_NUMBER" --repo "$REPO" --add-label "$LABEL" >/dev/null; then
+    print::success "Labeled"
+  else
+    print::warning "Failed to add label — continuing"
+  fi
+}
+
+process_pr() {
+  local raw="$1"
+  local owner name title clean_title pr_url reviewers clip
+  local mention_ids=() mention_preview="" login slack_id blocks draft_id
+
+  parse_pr_ref "$raw" || {
+    print::warning "Skipped (not a PR ref): $raw"
+    return 1
+  }
+  [[ -n "$PR_NUMBER" ]] || {
+    print::warning "Skipped (no PR number): $raw"
+    return 1
+  }
+
+  owner="${REPO%%/*}"
+  name="${REPO##*/}"
+  print::info "PR ${PR_NUMBER} on ${REPO}"
+
+  # Label first — before reviewer lookup / Slack draft
+  if [[ "$DRY_RUN" -eq 0 ]]; then
+    ensure_ready_label
+  fi
+
+  title="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json title -q .title)"
+  clean_title="$(strip_conventional_prefix "$title")"
+  # Prefer the host you copied (github.com / app.graphite.com / .dev). Bare number → GitHub.
+  pr_url="${PR_URL:-https://github.com/${REPO}/pull/${PR_NUMBER}}"
+
+  if [[ "$COPY_MODE" -eq 1 ]]; then
+    clip="${clean_title} ${pr_url}"
+    if [[ "$DRY_RUN" -eq 1 ]]; then
+      print::success "Dry run — would copy: ${clip}"
+      return 0
+    fi
+    printf '%s' "$clip" | pbcopy
+    print::success "Copied to clipboard (no mentions): ${clip}"
+    return 0
+  fi
+
+  reviewers="$(fetch_manual_reviewers "$owner" "$name" "$PR_NUMBER" || true)"
+
+  mention_ids=()
+  mention_preview=""
+  while IFS= read -r login; do
+    [[ -n "$login" ]] || continue
+    slack_id="$(lookup_slack_id "$login")"
+    if [[ -z "$slack_id" ]]; then
+      print::warning "No Slack id for GitHub user ${login} (skipped)"
+      continue
+    fi
+    mention_ids+=("$slack_id")
+    if [[ -n "$mention_preview" ]]; then
+      mention_preview="${mention_preview} @${login}"
+    else
+      mention_preview="@${login}"
+    fi
+  done <<<"$reviewers"
+
+  if [[ ${#mention_ids[@]} -gt 0 ]]; then
+    print::info "Draft (preview): ${mention_preview}: ${clean_title} <${pr_url}>"
+  else
+    print::warning "No manual reviewers with Slack mappings — drafting title + link only"
+    print::info "Draft (preview): ${clean_title} <${pr_url}>"
+  fi
+
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    print::success "Dry run — skipped label + draft"
+    return 0
+  fi
+
+  blocks="$(build_draft_blocks "$clean_title" "$pr_url" "${mention_ids[@]:-}")"
+  print::info "Creating Slack draft in ${CHANNEL} (real @mentions)…"
+  set +e
+  draft_id="$(create_slack_draft "$CHANNEL" "$blocks")"
+  status=$?
+  set -e
+  if [[ "$status" -eq 2 ]]; then
+    return 0
+  fi
+  if [[ "$status" -ne 0 ]]; then
+    return "$status"
+  fi
+  print::success "Slack draft ready${draft_id:+ (id ${draft_id})} — check the channel composer (or Drafts & sent)"
+  open_slack_to_channel "$CHANNEL"
+}
+
+listen_loop() {
+  local line candidate raw
+
+  print::hint "Listening for PRs — paste a URL/number and press enter. Ctrl-C to quit."
+  print::hint "Tip: ⌘⌥R (Raycast) drafts Slack with @mentions; ⌘⌥⇧R copies title + link (no mentions)."
+  if [[ "$DRY_RUN" -eq 1 ]]; then
+    print::hint "(dry-run mode)"
+  fi
+
+  while true; do
+    line=""
+    # bash 3.2: -t is integer seconds
+    if ! read -r -t 1 line 2>/dev/null; then
+      continue
+    fi
+
+    raw="$line"
+    candidate=""
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      line="${line#"${line%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      [[ -n "$line" ]] || continue
+      if parse_pr_ref "$line"; then
+        candidate="$line"
+        break
+      fi
+    done <<<"$raw"
+
+    if [[ -z "$candidate" ]]; then
+      line="${raw#"${raw%%[![:space:]]*}"}"
+      line="${line%"${line##*[![:space:]]}"}"
+      if [[ -n "$line" ]] && parse_pr_ref "$line"; then
+        candidate="$line"
+      fi
+    fi
+
+    if [[ -n "$candidate" ]]; then
+      print::info "— from terminal —"
+      process_pr "$candidate" || true
+      print::hint "Listening…"
+    elif [[ -n "${raw//[[:space:]]/}" ]]; then
+      print::warning "Not a PR ref: $raw"
+    fi
+  done
+}
+
+CHANNEL=""
+DRY_RUN=0
+COPY_MODE=0
+REPLACE_MODE="ask" # ask | yes | no
+POSITIONAL=()
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -h | --help)
+      usage
+      exit 0
+      ;;
+    --channel)
+      [[ $# -ge 2 ]] || die "--channel requires a Slack id (C…/G…/D…)"
+      CHANNEL="$2"
+      shift 2
+      ;;
+    --dry-run)
+      DRY_RUN=1
+      shift
+      ;;
+    --copy | --clipboard)
+      COPY_MODE=1
+      shift
+      ;;
+    --replace)
+      REPLACE_MODE="yes"
+      shift
+      ;;
+    --keep)
+      REPLACE_MODE="no"
+      shift
+      ;;
+    --)
+      shift
+      POSITIONAL+=("$@")
+      break
+      ;;
+    -*)
+      die "Unknown option: $1"
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+
+[[ ${#POSITIONAL[@]} -le 1 ]] || {
+  usage
+  exit 1
+}
+
+command -v gh >/dev/null || die "gh (GitHub CLI) is required"
+command -v jq >/dev/null || die "jq is required"
+if [[ "$COPY_MODE" -eq 0 ]]; then
+  command -v curl >/dev/null || die "curl is required"
+  [[ -f "$SLACK_MAP" ]] || die "Missing Slack map: $SLACK_MAP (set R4R_CLAY_BASE if clay-base isn't at ~/dev/clay-base)"
+fi
+
+CHANNEL="${CHANNEL:-$DEFAULT_CHANNEL}"
+if [[ "$DRY_RUN" -eq 0 && "$COPY_MODE" -eq 0 ]]; then
+  [[ -f "$SLACKCLI_CONFIG" ]] || die "Missing slackcli config at $SLACKCLI_CONFIG — run: slackcli auth parse-curl --login"
+  [[ "$CHANNEL" =~ ^[CGD][A-Z0-9]+$ ]] || die "Slack destination must be a C…/G…/D… id, got: $CHANNEL"
+fi
+
+r4r_log "==== start argv=[$*] channel=${CHANNEL} dry_run=${DRY_RUN} copy=${COPY_MODE} replace=${REPLACE_MODE} ===="
+
+if [[ ${#POSITIONAL[@]} -eq 0 ]]; then
+  listen_loop
+fi
+
+set +e
+process_pr "${POSITIONAL[0]}"
+status=$?
+set -e
+r4r_log "==== end status=${status} ===="
+exit "$status"

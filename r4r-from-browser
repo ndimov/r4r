@@ -1,0 +1,164 @@
+#!/usr/bin/env bash
+# r4r-from-browser — copy the frontmost browser tab URL, then run r4r on it.
+# Bound to ⌘⌥R via Raycast Script Command: raycast/r4r-current-page.sh
+# Bound to ⌘⌥⇧R (copy, no Slack draft) via: raycast/r4r-copy-current-page.sh
+#
+# Usage: r4r-from-browser [--copy] [extra r4r args…]
+#
+# Logs: ~/Library/Logs/r4r.log (override with R4R_LOG)
+
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "$0")" && pwd)"
+R4R="${R4R_BIN:-$ROOT/r4r}"
+R4R_LOG="${R4R_LOG:-$HOME/Library/Logs/r4r.log}"
+mkdir -p "$(dirname "$R4R_LOG")" 2>/dev/null || true
+
+log() {
+  printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" >>"$R4R_LOG" 2>/dev/null || true
+}
+
+notify() {
+  osascript -e 'on run argv' -e 'display notification (item 2 of argv) with title (item 1 of argv)' -e 'end run' -- "$1" "$2" 2>/dev/null || true
+}
+
+fail() {
+  local msg="$1"
+  log "ERROR from-browser: $msg"
+  notify "r4r" "$msg — see ~/Library/Logs/r4r.log"
+  echo "$msg" >&2
+  echo "(details: $R4R_LOG)" >&2
+  exit 1
+}
+
+# JXA avoids AppleScript dictionary compile errors across browsers.
+get_front_browser_url() {
+  osascript -l JavaScript <<'JXA'
+function run() {
+  const se = Application("System Events");
+  const front = se.applicationProcesses.whose({ frontmost: true })[0].name();
+
+  const chromeLike = {
+    "Google Chrome": true,
+    "Chromium": true,
+    "Brave Browser": true,
+    "Microsoft Edge": true,
+    "Arc": true,
+    "Dia": true,
+    "Vivaldi": true,
+    "Opera": true,
+  };
+
+  if (chromeLike[front]) {
+    const app = Application(front);
+    const wins = app.windows();
+    if (!wins || wins.length === 0) {
+      throw new Error("No window open in " + front);
+    }
+    const tab = wins[0].activeTab();
+    if (!tab) {
+      throw new Error("No active tab in " + front);
+    }
+    return tab.url();
+  }
+
+  if (front === "Safari") {
+    const safari = Application("Safari");
+    const docs = safari.documents();
+    if (!docs || docs.length === 0) {
+      throw new Error("No Safari document open");
+    }
+    return docs[0].url();
+  }
+
+  if (front === "Firefox") {
+    throw new Error("Firefox isn't supported — use Chrome, Arc, or Safari");
+  }
+
+  throw new Error("Front app isn't a supported browser (" + front + ")");
+}
+JXA
+}
+
+COPY_MODE=0
+R4R_EXTRA=()
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --copy | --clipboard)
+      COPY_MODE=1
+      shift
+      ;;
+    *)
+      R4R_EXTRA+=("$1")
+      shift
+      ;;
+  esac
+done
+
+log "==== from-browser start copy=${COPY_MODE} ===="
+
+if [[ ! -x "$R4R" ]]; then
+  fail "Missing executable at $R4R"
+fi
+
+err_file="$(mktemp -t r4r-from-browser)"
+trap 'rm -f "$err_file"' EXIT
+
+if ! url="$(get_front_browser_url 2>"$err_file")"; then
+  err="$(tr '\n' ' ' <"$err_file" | sed 's/[[:space:]]*$//')"
+  [[ -n "$err" ]] || err="Could not read browser URL (grant Automation access?)"
+  # Strip noisy osascript prefixes
+  err="$(printf '%s' "$err" | sed -E 's/^.*execution error: //; s/ \(-[0-9]+\)$//')"
+  log "ERROR browser url: $(cat "$err_file" 2>/dev/null || true)"
+  fail "$err"
+fi
+
+url="$(printf '%s' "$url" | tr -d '\r\n')"
+if [[ -z "$url" ]]; then
+  fail "Empty browser URL"
+fi
+
+log "INFO  browser url=$url"
+if [[ "$COPY_MODE" -eq 0 ]]; then
+  printf '%s' "$url" | pbcopy
+  notify "r4r" "Copied — running r4r"
+else
+  notify "r4r" "Copying title + link…"
+fi
+
+# Capture r4r output so Raycast silent mode still leaves a trail.
+# --replace: Raycast silent mode can't answer the interactive draft prompt
+r4r_args=()
+if [[ "$COPY_MODE" -eq 1 ]]; then
+  r4r_args+=(--copy)
+else
+  r4r_args+=(--replace)
+fi
+if [[ ${#R4R_EXTRA[@]} -gt 0 ]]; then
+  r4r_args+=("${R4R_EXTRA[@]}")
+fi
+
+set +e
+out="$("$R4R" "${r4r_args[@]}" "$url" 2>&1)"
+status=$?
+set -e
+
+# r4r already logs its own print::* lines; append raw capture for anything else
+if [[ -n "$out" ]]; then
+  printf '%s\n' "$out" >>"$R4R_LOG" 2>/dev/null || true
+fi
+
+if [[ "$status" -ne 0 ]]; then
+  log "ERROR r4r exit=${status} url=${url}"
+  notify "r4r" "Failed — see ~/Library/Logs/r4r.log"
+  printf '%s\n' "$out" >&2
+  echo "(details: $R4R_LOG)" >&2
+  exit "$status"
+fi
+
+log "==== from-browser ok ===="
+if [[ "$COPY_MODE" -eq 1 ]]; then
+  notify "r4r" "Copied to clipboard (no mentions)"
+else
+  notify "r4r" "Draft ready"
+fi

@@ -88,7 +88,7 @@ r4r --channel C0123456789 <pr>
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `R4R_SLACK_CHANNEL` | `C0A1HCU4PRB` | Slack channel id for drafts |
+| `R4R_SLACK_CHANNEL` | `C0CBZBA7X3J` | Slack channel id for drafts (`#revops-core-pr-reviews`) |
 | `R4R_REPO` | `clay-run/clay-base` | GitHub repo when you pass a bare PR number |
 | `R4R_CLAY_BASE` | `~/dev/clay-base` | Checkout that contains `github-to-slack.json` |
 | `R4R_SLACKCLI_CONFIG` | `~/.config/slackcli/workspaces.json` | slackcli browser session |

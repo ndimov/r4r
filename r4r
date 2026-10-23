@@ -13,7 +13,7 @@
 #   slackcli auth parse-curl --login
 #
 # Config:
-#   R4R_SLACK_CHANNEL   Override Slack channel (default: C0A1HCU4PRB)
+#   R4R_SLACK_CHANNEL   Override Slack channel (default: C0CBZBA7X3J)
 #   R4R_REPO            GitHub repo (default: clay-run/clay-base)
 #   R4R_CLAY_BASE       Local clay-base checkout (default: ~/dev/clay-base)
 #   R4R_SLACKCLI_CONFIG Path to slackcli workspaces.json
@@ -45,7 +45,7 @@ print::hint()    { printf '%s%s%s\n' "$_CYAN"   "$*" "$_RESET" >&2; r4r_log "HIN
 
 CLAY_BASE="${R4R_CLAY_BASE:-$HOME/dev/clay-base}"
 DEFAULT_REPO="${R4R_REPO:-clay-run/clay-base}"
-DEFAULT_CHANNEL="${R4R_SLACK_CHANNEL:-C0A1HCU4PRB}"
+DEFAULT_CHANNEL="${R4R_SLACK_CHANNEL:-C0CBZBA7X3J}"
 SLACK_MAP="${CLAY_BASE}/infrastructure/github-to-slack.json"
 SLACKCLI_CONFIG="${R4R_SLACKCLI_CONFIG:-$HOME/.config/slackcli/workspaces.json}"
 LABEL="ready for review"
@@ -61,7 +61,7 @@ Pings manually requested User reviewers only (skips CODEOWNERS auto-requests).
 Creates a Slack draft with real @mentions via your slackcli browser session.
 
 Options:
-  --channel C…   Slack destination (default: C0A1HCU4PRB)
+  --channel C…   Slack destination (default: C0CBZBA7X3J)
   --copy         Copy title + link (no mentions) to the clipboard; skip Slack draft
   --dry-run      Print the draft line; do not label or create draft
   --replace      If a draft already exists in the channel, replace it
@@ -567,11 +567,11 @@ create_slack_draft() {
       status=$?
       set -e
       if [[ "$status" -eq 0 && -n "$updated_id" ]]; then
-        print::warning "Updated existing draft in place — if it doesn't appear in Slack Drafts, open #team-search-pr-reviews or reload Slack (⌘R)"
+        print::warning "Updated existing draft in place — if it doesn't appear in Slack Drafts, open #revops-core-pr-reviews or reload Slack (⌘R)"
         printf '%s\n' "$updated_id"
         return 0
       fi
-      die "Could not replace existing Slack draft(s). Delete them in Slack Drafts for #team-search-pr-reviews, then re-run r4r."
+      die "Could not replace existing Slack draft(s). Delete them in Slack Drafts for #revops-core-pr-reviews, then re-run r4r."
     fi
   fi
 
@@ -608,7 +608,7 @@ create_slack_draft() {
         status=$?
         set -e
         if [[ "$status" -eq 0 && -n "$updated_id" ]]; then
-          print::warning "Updated in place after attached_draft_exists — open #team-search-pr-reviews or reload Slack (⌘R) if missing from Drafts"
+          print::warning "Updated in place after attached_draft_exists — open #revops-core-pr-reviews or reload Slack (⌘R) if missing from Drafts"
           printf '%s\n' "$updated_id"
           return 0
         fi
